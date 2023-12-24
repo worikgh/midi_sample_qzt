@@ -3,6 +3,7 @@ use std::env;
 use std::fs::File;
 use std::io::{self, BufRead};
 use std::path::Path;
+use std::time::Duration;
 use symphonia::core::audio::{SampleBuffer, SignalSpec};
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error;
@@ -10,17 +11,18 @@ use symphonia::core::formats::{FormatOptions, Track};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
-
+use midir::{MidiInput, MidiInputConnection};  
+use std::thread;
 
 #[derive(Debug, Deserialize)]
 struct SampleDescr {
     path: String,
-    note: usize,
+    note: u8,
 }
 
 struct SampleData {
     data: Vec<f32>,
-    note: usize,
+    note: u8,
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,6 +52,10 @@ fn process_samples_json(file_path: &str) -> Result<Vec<SampleDescr>,
     let config: Config = serde_json::from_str(&contents)?;
 
     Ok(config.samples_descr)
+}
+
+fn play_sample(_sample: &Vec<f32>){
+    println!("Play sample");
 }
 fn main() {
     
@@ -162,5 +168,36 @@ fn main() {
 	}
 	println!("Total size() {}", data.len());
 	sample_data.push(SampleData { data, note});
+    }
+
+    // Create a virtual midi port to read in data
+    let lpx_midi = MidiInput::new("MidiSampleQzt").unwrap();
+    let in_ports = lpx_midi.ports();
+    let in_port = in_ports.get(0).ok_or("no input port available").unwrap();
+    let _conn_in: MidiInputConnection<()> = lpx_midi.connect(
+        in_port,
+        "midi_input",
+        move |_stamp, message: &[u8], _| {
+            // let message = MidiMessage::from_bytes(message.to_vec());
+            if message.len() == 3 {
+		if message[0] == 144 {
+		    // All MIDI notes from LPX start with 144, for initial
+		    // noteon and noteoff
+		    let velocity = message[2];
+		    if velocity != 0 {
+			// NoteOn
+			eprintln!("Got note: {message:?}");
+			if let Some(sample) = sample_data.iter().
+			    find(|s| s.note == message[1]){
+				 play_sample(&sample.data);
+			    }
+		    }
+		}
+            }
+        },
+        (),
+    ).unwrap();
+    loop{
+	thread::sleep(Duration::from_millis(500));
     }
 }
