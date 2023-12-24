@@ -1,9 +1,8 @@
 use serde::{Deserialize};
+use std::io::Read;
 use std::env;
 use std::fs::File;
-use std::io::{self, BufRead};
 use std::path::Path;
-use std::time::Duration;
 use symphonia::core::audio::{SampleBuffer, SignalSpec};
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error;
@@ -12,40 +11,38 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use midir::{MidiInput, MidiInputConnection};  
-use std::thread;
+use jack::{Client, ClosureProcessHandler, Control};
 
+/// Each sample is described by a path to an audio file and a MIDI
+/// note
 #[derive(Debug, Deserialize)]
 struct SampleDescr {
     path: String,
     note: u8,
 }
 
+/// The programme is initialised with a JSON representation of this
+#[derive(Debug, Deserialize)]
+struct Config {
+    samples_descr: Vec<SampleDescr>,
+}
+
+/// Each sample is converted to a `Vec<32>` buffer and a MIDI note on
+/// start up.  When the MIDI note is received the buffer is played on
+/// the output
 struct SampleData {
     data: Vec<f32>,
     note: u8,
 }
 
-#[derive(Debug, Deserialize)]
-struct Config {
-    samples_descr: Vec<SampleDescr>,
-}
-fn read_lines<P>(filename: P) -> io::Result<io::Lines<io::BufReader<File>>>
-where P: AsRef<Path>, {
-    let file = File::open(filename)?;
-    Ok(io::BufReader::new(file).lines())
-}
+/// 
 fn process_samples_json(file_path: &str) -> Result<Vec<SampleDescr>,
 						   Box<dyn std::error::Error>> {
     eprintln!("file_path: {file_path}");
     // Read the JSON file
     let mut contents = String::new();
-    if let Ok(lines) = read_lines(file_path) {
-	for line in lines {
-            if let Ok(ip) = line {
-		contents = contents + ip.as_str();
-	    }
-	}
-    }
+    let mut file = File::open(file_path)?;
+    file.read_to_string(&mut contents).expect("Failed to read file");
 
     // let config: Config = serde_json::from_str(&j)?;
     println!("{contents}");
@@ -54,7 +51,7 @@ fn process_samples_json(file_path: &str) -> Result<Vec<SampleDescr>,
     Ok(config.samples_descr)
 }
 
-fn play_sample(_sample: &Vec<f32>){
+fn play_sample(_sample: &[f32]){
     println!("Play sample");
 }
 fn main() {
@@ -170,6 +167,14 @@ fn main() {
 	sample_data.push(SampleData { data, note});
     }
 
+
+    // Create a new Jack client
+    let (client, _status) = Client::new("midi_sample_qzt", jack::ClientOptions::NO_START_SERVER).unwrap();
+
+    // Create an audio output port
+    let mut audio_out = client.register_port("output", jack::AudioOut);
+    
+    
     // Create a virtual midi port to read in data
     let lpx_midi = MidiInput::new("MidiSampleQzt").unwrap();
     let in_ports = lpx_midi.ports();
@@ -179,25 +184,49 @@ fn main() {
         "midi_input",
         move |_stamp, message: &[u8], _| {
             // let message = MidiMessage::from_bytes(message.to_vec());
-            if message.len() == 3 {
-		if message[0] == 144 {
-		    // All MIDI notes from LPX start with 144, for initial
-		    // noteon and noteoff
-		    let velocity = message[2];
-		    if velocity != 0 {
-			// NoteOn
-			eprintln!("Got note: {message:?}");
-			if let Some(sample) = sample_data.iter().
-			    find(|s| s.note == message[1]){
-				 play_sample(&sample.data);
-			    }
-		    }
+            if message.len() == 3 &&  message[0] == 144 {
+		// All MIDI notes from LPX start with 144, for initial
+		// noteon and noteoff
+		let velocity = message[2];
+		if velocity != 0 {
+		    // NoteOn
+		    eprintln!("Got note: {message:?}");
+		    if let Some(sample) = sample_data.iter().
+			find(|s| s.note == message[1]){
+			    play_sample(&sample.data);
+			}
 		}
-            }
-        },
+	    }},
         (),
     ).unwrap();
-    loop{
-	thread::sleep(Duration::from_millis(500));
-    }
+    
+    let process_callback = ClosureProcessHandler::new(
+	move |c: &Client,
+	ps: &jack::ProcessScope| -> Control {
+            let output = audio_out.as_mut().expect("AuidoOut!").as_mut_slice(ps);
+
+            // Here you can process the audio data or write your
+            // custom audio generator function For example, let's
+            // generate a simple sine wave
+
+            let sample_rate = c.sample_rate() as f32;
+            let freq = 440.0; // Frequency of the sine wave
+            let amplitude = 0.5; // Amplitude of the sine wave
+
+            for (frame, sample) in output.iter_mut().enumerate() {
+		let t = frame as f32 / sample_rate; // Time in seconds
+		*sample = (t * freq * 2.0 *
+			   std::f32::consts::PI).sin() * amplitude;
+            }
+
+            Control::Continue
+	});
+    // Activate the Jack client and start the audio processing thread
+    let process_thread = client.activate_async((), process_callback).unwrap();
+    // Wait for the user to press enter to exit
+    println!("Press enter to exit...");
+    let _ = std::io::stdin().read_line(&mut String::new());
+    // Deactivate the Jack client and stop the audio processing thread
+    process_thread.deactivate().unwrap();
+
 }
