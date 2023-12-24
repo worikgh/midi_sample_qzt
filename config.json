@@ -1,0 +1,16 @@
+{
+  "samples_descr": [
+    {
+      "path": "samples/kick.wav",
+      "note": 36
+    },
+    {
+      "path": "samples/snare.flac",
+      "note": 38
+    },
+    {
+      "path": "samples/hihat.wav",
+      "note": 42
+    }
+  ]
+}
