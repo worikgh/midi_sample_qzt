@@ -1,3 +1,5 @@
+use std::sync::mpsc::channel;
+use std::sync::mpsc::Sender;
 use serde::{Deserialize};
 use std::io::Read;
 use std::env;
@@ -51,8 +53,10 @@ fn process_samples_json(file_path: &str) -> Result<Vec<SampleDescr>,
     Ok(config.samples_descr)
 }
 
-fn play_sample(_sample: &[f32]){
-    println!("Play sample");
+fn play_sample(sample: &[f32], sender:Sender<f32>){
+    for f in sample {
+	sender.send(*f).unwrap();
+    }
 }
 fn main() {
     
@@ -172,13 +176,18 @@ fn main() {
     let (client, _status) = Client::new("midi_sample_qzt", jack::ClientOptions::NO_START_SERVER).unwrap();
 
     // Create an audio output port
-    let mut audio_out = client.register_port("output", jack::AudioOut);
+    let mut audio_out:Result<jack::Port<jack::AudioOut>, jack::Error> =
+	client.register_port("output", jack::AudioOut);
     
     
     // Create a virtual midi port to read in data
     let lpx_midi = MidiInput::new("MidiSampleQzt").unwrap();
     let in_ports = lpx_midi.ports();
     let in_port = in_ports.get(0).ok_or("no input port available").unwrap();
+
+    // Create the channel that the buf reading closure uses to send data 
+    let (sender, receiver) = channel::<f32>();
+
     let _conn_in: MidiInputConnection<()> = lpx_midi.connect(
         in_port,
         "midi_input",
@@ -193,7 +202,7 @@ fn main() {
 		    eprintln!("Got note: {message:?}");
 		    if let Some(sample) = sample_data.iter().
 			find(|s| s.note == message[1]){
-			    play_sample(&sample.data);
+			    play_sample(&sample.data, sender.clone());
 			}
 		}
 	    }},
@@ -201,7 +210,7 @@ fn main() {
     ).unwrap();
     
     let process_callback = ClosureProcessHandler::new(
-	move |c: &Client,
+	move |_c: &Client,
 	ps: &jack::ProcessScope| -> Control {
             let output = audio_out.as_mut().expect("AuidoOut!").as_mut_slice(ps);
 
@@ -209,14 +218,15 @@ fn main() {
             // custom audio generator function For example, let's
             // generate a simple sine wave
 
-            let sample_rate = c.sample_rate() as f32;
-            let freq = 440.0; // Frequency of the sine wave
-            let amplitude = 0.5; // Amplitude of the sine wave
+            // let sample_rate = c.sample_rate() as f32;
+            // let freq = 440.0; // Frequency of the sine wave
+            // let amplitude = 0.5; // Amplitude of the sine wave
 
-            for (frame, sample) in output.iter_mut().enumerate() {
-		let t = frame as f32 / sample_rate; // Time in seconds
-		*sample = (t * freq * 2.0 *
-			   std::f32::consts::PI).sin() * amplitude;
+            for (_frame, sample) in output.iter_mut().enumerate() {
+		if let Ok(f) = receiver.try_recv() {
+		    
+		    *sample = f;
+		}
             }
 
             Control::Continue
