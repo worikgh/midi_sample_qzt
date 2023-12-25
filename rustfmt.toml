@@ -1,0 +1,21 @@
+# Set the line length limit
+max_width = 80
+
+# Limit comment width
+comment_width = 80
+
+# Place braces on the same line
+hard_tabs = false
+tab_spaces = 4
+newline_style = "Auto"
+indent_style = "Visual"
+
+merge_derives= true
+
+use_field_init_shorthand=true
+
+fn_args_layout = "Tall"
+
+fn_call_style="Auto"
+
+fn_return_indent = "WithArgs"
