@@ -8,7 +8,6 @@ use std::path::Path;
 use std::sync::mpsc::channel;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
-
 use symphonia::core::audio::{SampleBuffer, SignalSpec};
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error;
@@ -17,7 +16,13 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
-const NUM_CLIENT: usize = 300;
+// There need to be enough of these that there is allways one channel
+// available.  If long samples (that tie up a channel) are being
+// played in quick succession each new (long) samlpe ties up another
+// channel.  The symptom is sample playing continues after triggering
+// stops as the backlog is processed.  Nothing gets dropped.
+const NUM_RECEIVERS: usize = 300;
+
 /// Each sample is described by a path to an audio file and a MIDI
 /// note
 #[derive(Debug, Deserialize)]
@@ -40,9 +45,9 @@ struct SampleData {
     note: u8,
 }
 
-///
+/// The configuration file  processing
 fn process_samples_json(
-    file_path: &str,
+    file_path: &str
 ) -> Result<Vec<SampleDescr>, Box<dyn std::error::Error>> {
     // Read the JSON file
     let mut contents = String::new();
@@ -56,18 +61,8 @@ fn process_samples_json(
     Ok(config.samples_descr)
 }
 
-fn play_sample(
-    sample: &[f32],
-    sender: &Sender<f32>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    for f in sample {
-        sender.send(*f)?;
-    }
-    Ok(())
-}
-
 fn main() {
-    // Get command line arguments.
+    // Get and process command line arguments.
     let args: Vec<String> = env::args().collect();
     let samples_descr: Vec<SampleDescr> =
         match process_samples_json(args[1].as_str()) {
@@ -75,7 +70,8 @@ fn main() {
             Err(err) => panic!("{err}: Failed to process input"),
         };
 
-    // Prepare the sample buffers
+    // Prepare the sample buffers.  This code is from the Symphonia
+    // example
     let mut sample_data: Vec<SampleData> = vec![];
     for SampleDescr { path, note } in samples_descr {
         // Create a media source. Note that the MediaSource trait is
@@ -162,12 +158,12 @@ fn main() {
                         if let Some(buf) = &mut sample_buf {
                             buf.copy_interleaved_ref(audio_buf);
 
-                            // The samples may now be access via the `samples()` function.
+                            // The samples may now be access via the
+                            // `samples()` function.
                             sample_count += buf.samples().len();
                             data.append(&mut buf.samples().to_vec());
-
                         }
-                    }
+                    },
                     Err(Error::DecodeError(_)) => (),
                     Err(_) => break,
                 }
@@ -177,53 +173,63 @@ fn main() {
             break;
         }
 
-	let disp_path = if let Some(idx) = path.rfind('/'){
-	    path.get(idx..).unwrap()
-	}else{
-	    path.as_str()
-	};
+        // Extract the file name part of the sample to output some
+        // stats.
+        let disp_path = if let Some(idx) = path.rfind('/') {
+            path.get(idx..).unwrap()
+        } else {
+            path.as_str()
+        };
         eprintln!("{disp_path}  Total size() {sample_count}");
+
+        // Store prepared sample
         sample_data.push(SampleData { data, note });
     }
 
+    // Prepare the channels for sending data from the MIDI thread to
+    // the Jack thread
     let mut senders: Vec<Sender<f32>> = Vec::new();
     let mut receivers: Vec<Receiver<f32>> = Vec::new();
-    for _i in 0..NUM_CLIENT {
+    for _i in 0..NUM_RECEIVERS {
         let (sx, rx) = channel();
         senders.push(sx.clone());
         receivers.push(rx);
     }
 
+    // Create the Jack client
     let (client, _status) =
-        Client::new("midi_sample_qzt", jack::ClientOptions::NO_START_SERVER)
+        Client::new("MidiSampleQzt", jack::ClientOptions::NO_START_SERVER)
             .unwrap();
 
-    let mut port = //: jack::Port<jack::AudioOut> =
-        client.register_port("output", jack::AudioOut); //.unwrap();
-                                                        // Activate the Jack client and start the audio processing thread
+    let mut port = client.register_port("output", jack::AudioOut);
+
+    // Activate the Jack client and start the audio processing thread
     let as_client = client
         .activate_async(
             (),
             ClosureProcessHandler::new(
                 move |_c: &Client, ps: &jack::ProcessScope| -> Control {
-                    // let mut audio_out:Result<jack::Port<jack::AudioOut>, jack::Error>
                     let output = port.as_mut().unwrap().as_mut_slice(ps);
-
-                    // Here you can process the audio data or write your
-                    // custom audio generator function For example, let's
-                    // generate a simple sine wave
-
-                    // let sample_rate = c.sample_rate() as f32;
-                    // let freq = 440.0; // Frequency of the sine wave
-                    // let amplitude = 0.5; // Amplitude of the sine wave
 
                     for (_frame, sample) in output.iter_mut().enumerate() {
                         let mut f: f32 = 0.0;
                         for r in receivers.iter() {
                             if let Ok(_f) = r.try_recv() {
+                                // Mixing the channels together
                                 f += _f;
                             }
                         }
+
+                        // Unsure if this is the thing to do.  `tanh`
+                        // is almost linear except in the extremes
+                        // where it assymptotically approaches -1 and
+                        // 1
+                        // if f > 1.0 || f < -1.0 {
+                        //     eprintln!(
+                        //         "Sample is: {f}.  Adjusting too: {}",
+                        //         f.tanh()
+                        //     );
+                        // }
                         *sample = f.tanh();
                     }
                     Control::Continue
@@ -259,12 +265,10 @@ fn main() {
                         if let Some(sample) =
                             sample_data.iter().find(|s| s.note == message[1])
                         {
+                            for f in sample.data.iter() {
+                                senders.get(idx).unwrap().send(*f).unwrap();
+                            }
 
-                            play_sample(
-                                &sample.data,
-                                senders.get(idx).unwrap(),
-                            )
-                            .unwrap();
                             idx += 1;
                             idx %= senders.len();
                         }
