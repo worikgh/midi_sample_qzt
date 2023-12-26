@@ -261,12 +261,14 @@ fn main() {
                     let velocity = message[2];
                     if velocity != 0 {
                         // NoteOn
-
+			// eprintln!("Message: {message:?}");
                         if let Some(sample) =
                             sample_data.iter().find(|s| s.note == message[1])
                         {
+			    // Get the volume as a f32 fraction
+			    let volume:f32 = message[2] as f32 / 127.0;
                             for f in sample.data.iter() {
-                                senders.get(idx).unwrap().send(*f).unwrap();
+                                senders.get(idx).unwrap().send(*f * volume).unwrap();
                             }
 
                             idx += 1;
