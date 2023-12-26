@@ -49,11 +49,10 @@ fn process_samples_json(
     let mut file = File::open(file_path)?;
     file.read_to_string(&mut contents)
         .expect("Failed to read file");
-
-    // let config: Config = serde_json::from_str(&j)?;
-    // println!("{contents}");
+   
+    // Convert JSON
     let config: Config = serde_json::from_str(&contents)?;
-
+    
     Ok(config.samples_descr)
 }
 
