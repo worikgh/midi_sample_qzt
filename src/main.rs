@@ -8,7 +8,7 @@ use std::path::Path;
 use std::sync::mpsc::channel;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
+
 use symphonia::core::audio::{SampleBuffer, SignalSpec};
 use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error;
@@ -17,7 +17,7 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
-const NUM_CLIENT: usize = 3;
+const NUM_CLIENT: usize = 300;
 /// Each sample is described by a path to an audio file and a MIDI
 /// note
 #[derive(Debug, Deserialize)]
@@ -49,10 +49,10 @@ fn process_samples_json(
     let mut file = File::open(file_path)?;
     file.read_to_string(&mut contents)
         .expect("Failed to read file");
-   
+
     // Convert JSON
     let config: Config = serde_json::from_str(&contents)?;
-    
+
     Ok(config.samples_descr)
 }
 
@@ -165,102 +165,73 @@ fn main() {
                             // The samples may now be access via the `samples()` function.
                             sample_count += buf.samples().len();
                             data.append(&mut buf.samples().to_vec());
-                            // print!("\rDecoded {} samples", sample_count);
+
                         }
                     }
                     Err(Error::DecodeError(_)) => (),
                     Err(_) => break,
                 }
-                // println!("size() {}", data.len());
+
                 continue;
             }
             break;
         }
-        eprintln!("Total size() {sample_count}");
+
+	let disp_path = if let Some(idx) = path.rfind('/'){
+	    path.get(idx..).unwrap()
+	}else{
+	    path.as_str()
+	};
+        eprintln!("{disp_path}  Total size() {sample_count}");
         sample_data.push(SampleData { data, note });
     }
 
-    // Create a set of audio sinks for playing samples through.
-    // Playing of samples rotates through the sinks
-    // Make NUM_CLIENT big enough  so samples do not collide.
-    // struct AudioSink {
-    // 	port:jack::Port<AudioOut>,
-    // 	rx:Receiver<f32>,
-    // }
-    // let mut audio_sinks :Vec<AudioSink> = vec![];
     let mut senders: Vec<Sender<f32>> = Vec::new();
-    let mut receivers: Vec<Arc<Mutex<Receiver<f32>>>> = Vec::new();
-    let mut clients = Vec::new();
+    let mut receivers: Vec<Receiver<f32>> = Vec::new();
     for _i in 0..NUM_CLIENT {
-        let (client, _status) = Client::new(
-            "midi_sample_qzt",
-            jack::ClientOptions::NO_START_SERVER,
+        let (sx, rx) = channel();
+        senders.push(sx.clone());
+        receivers.push(rx);
+    }
+
+    let (client, _status) =
+        Client::new("midi_sample_qzt", jack::ClientOptions::NO_START_SERVER)
+            .unwrap();
+
+    let mut port = //: jack::Port<jack::AudioOut> =
+        client.register_port("output", jack::AudioOut); //.unwrap();
+                                                        // Activate the Jack client and start the audio processing thread
+    let as_client = client
+        .activate_async(
+            (),
+            ClosureProcessHandler::new(
+                move |_c: &Client, ps: &jack::ProcessScope| -> Control {
+                    // let mut audio_out:Result<jack::Port<jack::AudioOut>, jack::Error>
+                    let output = port.as_mut().unwrap().as_mut_slice(ps);
+
+                    // Here you can process the audio data or write your
+                    // custom audio generator function For example, let's
+                    // generate a simple sine wave
+
+                    // let sample_rate = c.sample_rate() as f32;
+                    // let freq = 440.0; // Frequency of the sine wave
+                    // let amplitude = 0.5; // Amplitude of the sine wave
+
+                    for (_frame, sample) in output.iter_mut().enumerate() {
+                        let mut f: f32 = 0.0;
+                        for r in receivers.iter() {
+                            if let Ok(_f) = r.try_recv() {
+                                f += _f;
+                            }
+                        }
+                        *sample = f.tanh();
+                    }
+                    Control::Continue
+                },
+            ),
         )
         .unwrap();
 
-        let (sx, rx) = channel();
-
-        let rx_arc = Arc::new(Mutex::new(rx));
-        let rx_arc2 = rx_arc.clone();
-
-        let mut port = //: jack::Port<jack::AudioOut> =
-            client.register_port("output", jack::AudioOut); //.unwrap();
-                                                            // Activate the Jack client and start the audio processing thread
-        clients.push(
-            client
-                .activate_async(
-                    (),
-                    ClosureProcessHandler::new(
-                        move |_c: &Client,
-                              ps: &jack::ProcessScope|
-                              -> Control {
-                            // let mut audio_out:Result<jack::Port<jack::AudioOut>, jack::Error>
-                            let output =
-                                port.as_mut().unwrap().as_mut_slice(ps);
-
-                            // Here you can process the audio data or write your
-                            // custom audio generator function For example, let's
-                            // generate a simple sine wave
-
-                            // let sample_rate = c.sample_rate() as f32;
-                            // let freq = 440.0; // Frequency of the sine wave
-                            // let amplitude = 0.5; // Amplitude of the sine wave
-
-                            for (_frame, sample) in
-                                output.iter_mut().enumerate()
-                            {
-                                if let Ok(f) =
-                                    rx_arc2.lock().unwrap().try_recv()
-                                {
-                                    *sample = f;
-                                }
-                            }
-                            Control::Continue
-                        },
-                    ),
-                )
-                .unwrap(),
-        );
-
-        // audio_sinks.push(AudioSink{port, rx});
-        eprintln!("Push sender {}", senders.len());
-        senders.push(sx.clone());
-        receivers.push(rx_arc.clone());
-        let f: f32 = 0.3201;
-        match sx.send(f) {
-            Ok(_) => eprintln!("Sent {f}"),
-            Err(err) => panic!("{err}: Sending to new channel, first time"),
-        };
-    }
-
-    // Check senders
-    for s in senders.iter() {
-        let s = s.clone();
-        match s.send(0.3201) {
-            Ok(_) => (),
-            Err(err) => panic!("{err}: Sending to new channel"),
-        };
-    }
     // Create a virtual midi port to read in data
     let lpx_midi = MidiInput::new("MidiSampleQzt").unwrap();
     let in_ports = lpx_midi.ports();
@@ -277,21 +248,23 @@ fn main() {
             "midi_input",
             move |_stamp, message: &[u8], _| {
                 // let message = MidiMessage::from_bytes(message.to_vec());
+
                 if message.len() == 3 && message[0] == 144 {
                     // All MIDI notes from LPX start with 144, for initial
                     // noteon and noteoff
                     let velocity = message[2];
                     if velocity != 0 {
                         // NoteOn
-                        eprintln!("Got note: {message:?}");
+
                         if let Some(sample) =
                             sample_data.iter().find(|s| s.note == message[1])
                         {
-                            eprintln!("Sending on channel: {idx}");
+
                             play_sample(
                                 &sample.data,
                                 senders.get(idx).unwrap(),
-                            ).unwrap();
+                            )
+                            .unwrap();
                             idx += 1;
                             idx %= senders.len();
                         }
@@ -302,10 +275,8 @@ fn main() {
         )
         .unwrap();
     // Wait for the user to press enter to exit
-    println!("Press enter to exit...");
+    eprintln!("Press enter to exit...");
     let _ = std::io::stdin().read_line(&mut String::new());
     // Deactivate the Jack client and stop the audio processing thread
-    for c in clients {
-        c.deactivate().unwrap();
-    }
+    as_client.deactivate().unwrap();
 }
