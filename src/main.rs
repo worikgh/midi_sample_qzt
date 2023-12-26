@@ -57,13 +57,14 @@ fn process_samples_json(
     Ok(config.samples_descr)
 }
 
-fn play_sample(sample: &[f32], sender: &Sender<f32>) {
+fn play_sample(
+    sample: &[f32],
+    sender: &Sender<f32>,
+) -> Result<(), Box<dyn std::error::Error>> {
     for f in sample {
-        match sender.send(*f) {
-            Ok(_) => (),
-            Err(err) => panic!("{err}: Error sending: {f:?}"),
-        };
+        sender.send(*f)?;
     }
+    Ok(())
 }
 
 fn main() {
@@ -191,7 +192,7 @@ fn main() {
     let mut senders: Vec<Sender<f32>> = Vec::new();
     let mut receivers: Vec<Arc<Mutex<Receiver<f32>>>> = Vec::new();
     let mut clients = Vec::new();
-    for i in 0..NUM_CLIENT {
+    for _i in 0..NUM_CLIENT {
         let (client, _status) = Client::new(
             "midi_sample_qzt",
             jack::ClientOptions::NO_START_SERVER,
@@ -291,7 +292,7 @@ fn main() {
                             play_sample(
                                 &sample.data,
                                 senders.get(idx).unwrap(),
-                            );
+                            ).unwrap();
                             idx += 1;
                             idx %= senders.len();
                         }
